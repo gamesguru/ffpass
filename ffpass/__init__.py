@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 
 # Reverse-engineering by Laurent Clevy (@lclevy)
 # from https://github.com/lclevy/firepwd/blob/master/firepwd.py
@@ -54,8 +55,14 @@ MAGIC1 = b"\xf8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
 # des-ede3-cbc
 MAGIC2 = (1, 2, 840, 113_549, 3, 7)
 
+# aes-256-cbc
+MAGIC_AES = (2, 16, 840, 1, 101, 3, 4, 1, 42)
+
 # pkcs-12-PBEWithSha1AndTripleDESCBC
-MAGIC3 = (1, 2, 840, 113_549, 1, 12, 5, 1, 3)
+OID_PKCS12_3DES = (1, 2, 840, 113_549, 1, 12, 5, 1, 3)
+
+# pkcs5PBES2
+OID_PBES2 = (1, 2, 840, 113_549, 1, 5, 13)
 
 
 class NoDatabase(Exception):
@@ -86,18 +93,27 @@ def getKey(directory: Path, masterPassword=""):
     row = next(c)
     globalSalt, item2 = row
 
+    # 1. Unpack item2 so it is an Object, not a Tuple
+    decodedItem2, _ = der_decode(item2)
+
     try:
-        decodedItem2, _ = der_decode(item2)
+        # Structure: Sequence[0] (AlgoID) -> [0] (OID)
+        algorithm_oid = decodedItem2[0][0].asTuple()
+    except (IndexError, AttributeError):
+        raise ValueError("Could not decode password validation data structure.")
+
+    if algorithm_oid == OID_PKCS12_3DES:
         encryption_method = '3DES'
         entrySalt = decodedItem2[0][1][0].asOctets()
         cipherT = decodedItem2[1].asOctets()
         clearText = decrypt3DES(
             globalSalt, masterPassword, entrySalt, cipherT
-        )  # usual Mozilla PBE
-    except AttributeError:
+        )
+    elif algorithm_oid == OID_PBES2:
         encryption_method = 'AES'
-        decodedItem2 = der_decode(item2)
         clearText = decrypt_aes(decodedItem2, masterPassword, globalSalt)
+    else:
+        raise ValueError(f"Unknown encryption method OID: {algorithm_oid}")
 
     if clearText != b"password-check\x02\x02":
         raise WrongPassword()
@@ -118,24 +134,30 @@ def getKey(directory: Path, masterPassword=""):
             "The Firefox database appears to be broken. Try to add a password to rebuild it."
         )  # CKA_ID
 
+    # Determine encryption method for the key itself
     if encryption_method == 'AES':
-        decodedA11 = der_decode(a11)
+        # 2. Unpack a11 so it is also an Object (Consistency Fix)
+        decodedA11, _ = der_decode(a11)
         key = decrypt_aes(decodedA11, masterPassword, globalSalt)
+        key = PKCS7unpad(key)
     elif encryption_method == '3DES':
         decodedA11, _ = der_decode(a11)
         oid = decodedA11[0][0].asTuple()
-        assert oid == MAGIC3, f"The key is encoded with an unknown format {oid}"
+        assert oid == OID_PKCS12_3DES, f"The key is encoded with an unknown format {oid}"
         entrySalt = decodedA11[0][1][0].asOctets()
+        # FIX: Ciphertext is at index [1] of the Sequence, NOT inside parameters [0][1]
         cipherT = decodedA11[1].asOctets()
         key = decrypt3DES(globalSalt, masterPassword, entrySalt, cipherT)
+        key = PKCS7unpad(key)
+    # else: (impossible, handled above)
 
     logging.info("{}: {}".format(encryption_method, key.hex()))
-    return key[:24]
+    return key
 
 
-def PKCS7pad(b):
-    l = (-len(b) - 1) % 8 + 1
-    return b + bytes([l] * l)
+def PKCS7pad(b, block_size=8):
+    pad_len = (-len(b) - 1) % block_size + 1
+    return b + bytes([pad_len] * pad_len)
 
 
 def PKCS7unpad(b):
@@ -143,9 +165,18 @@ def PKCS7unpad(b):
 
 
 def decrypt_aes(decoded_item, master_password, global_salt):
-    entry_salt = decoded_item[0][0][1][0][1][0].asOctets()
-    iteration_count = int(decoded_item[0][0][1][0][1][1])
-    key_length = int(decoded_item[0][0][1][0][1][2])
+    # Expects decoded_item as an ASN.1 OBJECT (Sequence), NOT a tuple.
+    # Structure:
+    #   [0] AlgorithmIdentifier (Metadata)
+    #   [1] EncryptedData (Ciphertext)
+
+    # 1. Get PBKDF2 Parameters from Metadata [0]
+    # Path: AlgoID[0] -> Params[1] -> KeyDerivFunc[0] -> PBKDF2Params[1]
+    pbkdf2_params = decoded_item[0][1][0][1]
+
+    entry_salt = pbkdf2_params[0].asOctets()
+    iteration_count = int(pbkdf2_params[1])
+    key_length = int(pbkdf2_params[2])
     assert key_length == 32
 
     encoded_password = sha1(global_salt + master_password.encode('utf-8')).digest()
@@ -153,8 +184,26 @@ def decrypt_aes(decoded_item, master_password, global_salt):
         'sha256', encoded_password,
         entry_salt, iteration_count, dklen=key_length)
 
-    init_vector = b'\x04\x0e' + decoded_item[0][0][1][1][1].asOctets()
-    encrypted_value = decoded_item[0][1].asOctets()
+    # 2. Get IV from Metadata [0]
+    # AlgoID[0] -> Params[1] -> EncryptionScheme[1] -> IV[1]
+    iv_obj = decoded_item[0][1][1][1]
+    init_vector = iv_obj.asOctets()
+
+    # IF 14 bytes, THEN assume it's the raw payload of an ASN.1 OctetString,
+    #   and add missing the header (0x04 0x0E) to make a full 16-byte block.
+    if len(init_vector) == 14:
+        init_vector = b'\x04\x0e' + init_vector
+    # IF 18 bytes (Standard ASN.1 OctetString: Tag 0x04 + Len 0x10 + 16 bytes), THEN strip header.
+    elif len(init_vector) == 18 and init_vector.startswith(b'\x04\x10'):
+        init_vector = init_vector[2:]
+
+    # Final check
+    if len(init_vector) != 16:
+        raise ValueError(f"Incorrect IV length: {len(init_vector)} bytes (expected 16).")
+
+    # 3. Get Ciphertext from Data [1]
+    encrypted_value = decoded_item[1].asOctets()
+
     cipher = AES.new(key, AES.MODE_CBC, init_vector)
     return cipher.decrypt(encrypted_value)
 
@@ -177,23 +226,55 @@ def decodeLoginData(key, data):
     # first base64 decoding, then ASN1DERdecode
     asn1data, _ = der_decode(b64decode(data))
     assert asn1data[0].asOctets() == MAGIC1
-    assert asn1data[1][0].asTuple() == MAGIC2
+
+    algo_oid = asn1data[1][0].asTuple()
     iv = asn1data[1][1].asOctets()
     ciphertext = asn1data[2].asOctets()
-    des = DES3.new(key, DES3.MODE_CBC, iv)
-    return PKCS7unpad(des.decrypt(ciphertext)).decode()
+
+    # Handle encryption types
+    if algo_oid == MAGIC2:
+        # 3DES logic (ensure key is 24 bytes)
+        des = DES3.new(key[:24], DES3.MODE_CBC, iv)
+        return PKCS7unpad(des.decrypt(ciphertext)).decode()
+
+    elif algo_oid == MAGIC_AES:
+        # AES logic (use full key, all 32 bytes)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        return PKCS7unpad(cipher.decrypt(ciphertext)).decode()
+
+    else:
+        raise ValueError(f"Unknown encryption OID: {algo_oid}")
 
 
 def encodeLoginData(key, data):
-    iv = secrets.token_bytes(8)
-    des = DES3.new(key, DES3.MODE_CBC, iv)
-    ciphertext = des.encrypt(PKCS7pad(data.encode()))
     asn1data = Sequence()
     asn1data[0] = OctetString(MAGIC1)
     asn1data[1] = Sequence()
-    asn1data[1][0] = ObjectIdentifier(MAGIC2)
-    asn1data[1][1] = OctetString(iv)
-    asn1data[2] = OctetString(ciphertext)
+
+    if len(key) == 32:  # AES-256
+        iv = secrets.token_bytes(16)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        ciphertext = cipher.encrypt(PKCS7pad(data.encode(), block_size=16))
+
+        asn1data[1][0] = ObjectIdentifier(MAGIC_AES)
+        asn1data[1][1] = OctetString(iv)
+        asn1data[2] = OctetString(ciphertext)
+
+    elif len(key) == 24:  # 3DES
+        iv = secrets.token_bytes(8)
+        des = DES3.new(key, DES3.MODE_CBC, iv)
+        ciphertext = des.encrypt(PKCS7pad(data.encode(), block_size=8))
+
+        asn1data[1][0] = ObjectIdentifier(MAGIC2)
+        asn1data[1][1] = OctetString(iv)
+        asn1data[2] = OctetString(ciphertext)
+
+    else:
+        raise ValueError(
+            f"Unknown key type/size: {len(key)} bytes. "
+            "Known types: [3DES: 24 bytes], [AES-256: 32 bytes]."
+        )
+
     return b64encode(der_encode(asn1data)).decode()
 
 
@@ -395,6 +476,13 @@ def makeParser():
 
     parser_import.set_defaults(func=main_import)
     parser_export.set_defaults(func=main_export)
+
+    try:
+        import argcomplete
+        argcomplete.autocomplete(parser)
+    except ModuleNotFoundError:
+        pass
+
     return parser
 
 
