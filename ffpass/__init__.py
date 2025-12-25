@@ -1,36 +1,17 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 
-# Reverse-engineering by Laurent Clevy (@lclevy)
-# from https://github.com/lclevy/firepwd/blob/master/firepwd.py
-
 """
 The MIT License (MIT)
 Copyright (c) 2018 Louis Abraham <louis.abraham@yahoo.fr>
 Laurent Clevy (@lorenzo2472)
-# from https://github.com/lclevy/firepwd/blob/master/firepwd.py
-\x1B[34m\033[F\033[F
 
 ffpass can import and export passwords from Firefox Quantum.
-
-\x1B[0m\033[1m\033[F\033[F
-
-example of usage:
-    ffpass export --file passwords.csv
-
-    ffpass import --file passwords.csv
-
-\033[0m\033[1;32m\033[F\033[F
-
-If you found this code useful, add a star on <https://github.com/louisabraham/ffpass>!
-
-\033[0m\033[F\033[F
 """
 
 import sys
 from base64 import b64decode, b64encode
 from hashlib import sha1, pbkdf2_hmac
-import hmac
 import argparse
 import json
 from pathlib import Path
@@ -43,6 +24,7 @@ from urllib.parse import urlparse
 import sqlite3
 import os.path
 import logging
+import string
 
 from pyasn1.codec.der.decoder import decode as der_decode
 from pyasn1.codec.der.encoder import encode as der_encode
@@ -77,82 +59,26 @@ class NoProfile(Exception):
     pass
 
 
-def getKey(directory: Path, masterPassword=""):
-    dbfile: Path = directory / "key4.db"
+def censor(data):
+    """
+    Censors the middle third of a hex string or bytes object.
+    """
+    if not data: return "None"
+    s = data.hex() if isinstance(data, (bytes, bytearray)) else str(data)
 
-    if not dbfile.exists():
-        raise NoDatabase()
+    length = len(s)
+    if length <= 12: return s
 
-    conn = sqlite3.connect(dbfile.as_posix())
-    c = conn.cursor()
-    c.execute("""
-        SELECT item1, item2
-        FROM metadata
-        WHERE id = 'password';
-    """)
-    row = next(c)
-    globalSalt, item2 = row
+    third = length // 3
+    return f"{s[:third]}.....{s[2*third:]}"
 
-    # 1. Unpack item2 so it is an Object, not a Tuple
-    decodedItem2, _ = der_decode(item2)
 
-    try:
-        # Structure: Sequence[0] (AlgoID) -> [0] (OID)
-        algorithm_oid = decodedItem2[0][0].asTuple()
-    except (IndexError, AttributeError):
-        raise ValueError("Could not decode password validation data structure.")
-
-    if algorithm_oid == OID_PKCS12_3DES:
-        encryption_method = '3DES'
-        entrySalt = decodedItem2[0][1][0].asOctets()
-        cipherT = decodedItem2[1].asOctets()
-        clearText = decrypt3DES(
-            globalSalt, masterPassword, entrySalt, cipherT
-        )
-    elif algorithm_oid == OID_PBES2:
-        encryption_method = 'AES'
-        clearText = decrypt_aes(decodedItem2, masterPassword, globalSalt)
-    else:
-        raise ValueError(f"Unknown encryption method OID: {algorithm_oid}")
-
-    if clearText != b"password-check\x02\x02":
-        raise WrongPassword()
-
-    logging.info("password checked")
-
-    # decrypt 3des key to decrypt "logins.json" content
-    c.execute("""
-        SELECT a11, a102
-        FROM nssPrivate
-        WHERE a102 = ?;
-    """, (MAGIC1,))
-    try:
-        row = next(c)
-        a11, a102 = row  # CKA_ID
-    except StopIteration:
-        raise Exception(
-            "The Firefox database appears to be broken. Try to add a password to rebuild it."
-        )  # CKA_ID
-
-    # Determine encryption method for the key itself
-    if encryption_method == 'AES':
-        # 2. Unpack a11 so it is also an Object (Consistency Fix)
-        decodedA11, _ = der_decode(a11)
-        key = decrypt_aes(decodedA11, masterPassword, globalSalt)
-        key = PKCS7unpad(key)
-    elif encryption_method == '3DES':
-        decodedA11, _ = der_decode(a11)
-        oid = decodedA11[0][0].asTuple()
-        assert oid == OID_PKCS12_3DES, f"The key is encoded with an unknown format {oid}"
-        entrySalt = decodedA11[0][1][0].asOctets()
-        # FIX: Ciphertext is at index [1] of the Sequence, NOT inside parameters [0][1]
-        cipherT = decodedA11[1].asOctets()
-        key = decrypt3DES(globalSalt, masterPassword, entrySalt, cipherT)
-        key = PKCS7unpad(key)
-    # else: (impossible, handled above)
-
-    logging.info("{}: {}".format(encryption_method, key.hex()))
-    return key
+def clean_iv(iv_bytes):
+    if len(iv_bytes) == 14:
+        return b'\x04\x0e' + iv_bytes
+    elif len(iv_bytes) == 18 and iv_bytes.startswith(b'\x04\x10'):
+        return iv_bytes[2:]
+    return iv_bytes
 
 
 def PKCS7pad(b, block_size=8):
@@ -161,54 +87,13 @@ def PKCS7pad(b, block_size=8):
 
 
 def PKCS7unpad(b):
+    if not b:
+        return b
     return b[: -b[-1]]
 
 
-def decrypt_aes(decoded_item, master_password, global_salt):
-    # Expects decoded_item as an ASN.1 OBJECT (Sequence), NOT a tuple.
-    # Structure:
-    #   [0] AlgorithmIdentifier (Metadata)
-    #   [1] EncryptedData (Ciphertext)
-
-    # 1. Get PBKDF2 Parameters from Metadata [0]
-    # Path: AlgoID[0] -> Params[1] -> KeyDerivFunc[0] -> PBKDF2Params[1]
-    pbkdf2_params = decoded_item[0][1][0][1]
-
-    entry_salt = pbkdf2_params[0].asOctets()
-    iteration_count = int(pbkdf2_params[1])
-    key_length = int(pbkdf2_params[2])
-    assert key_length == 32
-
-    encoded_password = sha1(global_salt + master_password.encode('utf-8')).digest()
-    key = pbkdf2_hmac(
-        'sha256', encoded_password,
-        entry_salt, iteration_count, dklen=key_length)
-
-    # 2. Get IV from Metadata [0]
-    # AlgoID[0] -> Params[1] -> EncryptionScheme[1] -> IV[1]
-    iv_obj = decoded_item[0][1][1][1]
-    init_vector = iv_obj.asOctets()
-
-    # IF 14 bytes, THEN assume it's the raw payload of an ASN.1 OctetString,
-    #   and add missing the header (0x04 0x0E) to make a full 16-byte block.
-    if len(init_vector) == 14:
-        init_vector = b'\x04\x0e' + init_vector
-    # IF 18 bytes (Standard ASN.1 OctetString: Tag 0x04 + Len 0x10 + 16 bytes), THEN strip header.
-    elif len(init_vector) == 18 and init_vector.startswith(b'\x04\x10'):
-        init_vector = init_vector[2:]
-
-    # Final check
-    if len(init_vector) != 16:
-        raise ValueError(f"Incorrect IV length: {len(init_vector)} bytes (expected 16).")
-
-    # 3. Get Ciphertext from Data [1]
-    encrypted_value = decoded_item[1].asOctets()
-
-    cipher = AES.new(key, AES.MODE_CBC, init_vector)
-    return cipher.decrypt(encrypted_value)
-
-
 def decrypt3DES(globalSalt, masterPassword, entrySalt, encryptedData):
+    import hmac
     hp = sha1(globalSalt + masterPassword.encode()).digest()
     pes = entrySalt + b"\x00" * (20 - len(entrySalt))
     chp = sha1(hp + entrySalt).digest()
@@ -218,32 +103,143 @@ def decrypt3DES(globalSalt, masterPassword, entrySalt, encryptedData):
     k = k1 + k2
     iv = k[-8:]
     key = k[:24]
-    logging.info("key={} iv={}".format(key.hex(), iv.hex()))
     return DES3.new(key, DES3.MODE_CBC, iv).decrypt(encryptedData)
 
 
+def decrypt_key_entry(a11, global_salt, master_password):
+    try:
+        decoded, _ = der_decode(a11)
+        key_oid = decoded[0][0].asTuple()
+
+        if key_oid == OID_PBES2:
+            # AES Logic
+            algo = decoded[0][1][0]
+            pbkdf2_params = algo[1]
+            entry_salt = pbkdf2_params[0].asOctets()
+            iters = int(pbkdf2_params[1])
+            key_len = int(pbkdf2_params[2])
+
+            logging.debug(f"  > Method: PBKDF2-HMAC-SHA256 | Iterations: {iters}")
+            logging.debug(f"  > Salt: {censor(entry_salt)} (Local) + {censor(global_salt)} (Global)")
+
+            enc_pwd = sha1(global_salt + master_password.encode('utf-8')).digest()
+            k = pbkdf2_hmac('sha256', enc_pwd, entry_salt, iters, dklen=key_len)
+
+            iv = clean_iv(decoded[0][1][1][1].asOctets())
+            logging.debug(f"  > Cipher: AES-256-CBC | IV: {censor(iv)}")
+
+            cipher = AES.new(k, AES.MODE_CBC, iv)
+            return PKCS7unpad(cipher.decrypt(decoded[1].asOctets()))
+
+        elif key_oid == OID_PKCS12_3DES:
+            # 3DES Logic
+            entry_salt = decoded[0][1][0].asOctets()
+            ciphertext = decoded[1].asOctets()
+
+            logging.debug(f"  > Method: PKCS12-3DES-Derivation")
+            logging.debug(f"  > Salt: {censor(entry_salt)} (Local) + {censor(global_salt)} (Global)")
+
+            import hmac
+            hp = sha1(global_salt + master_password.encode()).digest()
+            pes = entry_salt + b"\x00" * (20 - len(entry_salt))
+            chp = sha1(hp + entry_salt).digest()
+            k1 = hmac.new(chp, pes + entry_salt, sha1).digest()
+            tk = hmac.new(chp, pes, sha1).digest()
+            k2 = hmac.new(chp, tk + entry_salt, sha1).digest()
+            k = k1 + k2
+            iv = k[-8:]
+            key = k[:24]
+
+            logging.debug(f"  > Cipher: 3DES-CBC | IV: {censor(iv)}")
+            return PKCS7unpad(DES3.new(key, DES3.MODE_CBC, iv).decrypt(ciphertext))
+
+    except Exception as e:
+        logging.debug(f"  > Failed: {e}")
+        return None
+
+
+def get_all_keys(directory, pwd=""):
+    db = Path(directory) / "key4.db"
+    if not db.exists(): raise NoDatabase()
+
+    conn = sqlite3.connect(str(db))
+    c = conn.cursor()
+
+    # 1. Get Global Salt
+    c.execute("SELECT item1, item2 FROM metadata WHERE id = 'password'")
+    try:
+        global_salt, item2 = next(c)
+    except StopIteration: raise NoDatabase()
+
+    logging.info(f"[*] Global Salt: {censor(global_salt)}")
+
+    # 2. Check Password (simplified via key decryption attempt)
+    # 3. Find ALL Keys
+    c.execute("SELECT a11, a102 FROM nssPrivate")
+    rows = c.fetchall()
+    logging.info(f"[*] Found {len(rows)} entries in nssPrivate")
+
+    found_keys = []
+    for idx, (a11, a102) in enumerate(rows):
+        logging.debug(f"[*] Attempting to decrypt Key #{idx} (ID: {censor(a102)})...")
+
+        key = decrypt_key_entry(a11, global_salt, pwd)
+
+        if key:
+            logging.info(f"[*] Decrypted Key #{idx}: {len(key)} bytes | ID: {a102.hex()}")
+            found_keys.append(key)
+        else:
+            logging.debug(f"[*] Key #{idx}: Failed to decrypt (Wrong Password or Corrupt)")
+
+    if not found_keys:
+        # If no keys decrypted, the password is definitely wrong
+        raise WrongPassword()
+
+    return found_keys, global_salt
+
+
+def try_decrypt_login(key, ciphertext, iv):
+    # Try AES
+    if len(key) in [16, 24, 32]:
+        try:
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            pt = cipher.decrypt(ciphertext)
+            res = PKCS7unpad(pt)
+            text = res.decode('utf-8')
+            if is_valid_text(text): return text, "AES-Standard"
+        except: pass
+
+    # Try 3DES
+    if len(key) == 24:
+        try:
+            cipher = DES3.new(key, DES3.MODE_CBC, iv[:8])
+            pt = cipher.decrypt(ciphertext)
+            res = PKCS7unpad(pt)
+            text = res.decode('utf-8')
+            if is_valid_text(text): return text, "3DES-Standard"
+        except: pass
+
+    return None, None
+
+
+def is_valid_text(text):
+    if not text or len(text) < 2: return False
+    printable = set(string.printable)
+    if sum(1 for c in text if c in printable) / len(text) < 0.9: return False
+    return True
+
+
 def decodeLoginData(key, data):
-    # first base64 decoding, then ASN1DERdecode
-    asn1data, _ = der_decode(b64decode(data))
-    assert asn1data[0].asOctets() == MAGIC1
+    try:
+        asn1data, _ = der_decode(b64decode(data))
+        iv = clean_iv(asn1data[1][1].asOctets())
+        ciphertext = asn1data[2].asOctets()
 
-    algo_oid = asn1data[1][0].asTuple()
-    iv = asn1data[1][1].asOctets()
-    ciphertext = asn1data[2].asOctets()
-
-    # Handle encryption types
-    if algo_oid == MAGIC2:
-        # 3DES logic (ensure key is 24 bytes)
-        des = DES3.new(key[:24], DES3.MODE_CBC, iv)
-        return PKCS7unpad(des.decrypt(ciphertext)).decode()
-
-    elif algo_oid == MAGIC_AES:
-        # AES logic (use full key, all 32 bytes)
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        return PKCS7unpad(cipher.decrypt(ciphertext)).decode()
-
-    else:
-        raise ValueError(f"Unknown encryption OID: {algo_oid}")
+        text, method = try_decrypt_login(key, ciphertext, iv)
+        if text: return text
+        raise ValueError("Decryption failed")
+    except Exception:
+        raise ValueError("Decryption failed")
 
 
 def encodeLoginData(key, data):
@@ -268,12 +264,8 @@ def encodeLoginData(key, data):
         asn1data[1][0] = ObjectIdentifier(MAGIC2)
         asn1data[1][1] = OctetString(iv)
         asn1data[2] = OctetString(ciphertext)
-
     else:
-        raise ValueError(
-            f"Unknown key type/size: {len(key)} bytes. "
-            "Known types: [3DES: 24 bytes], [AES-256: 32 bytes]."
-        )
+        raise ValueError(f"Unknown key type/size: {len(key)}")
 
     return b64encode(der_encode(asn1data)).decode()
 
@@ -295,17 +287,15 @@ def exportLogins(key, jsonLogins):
         return []
     logins = []
     for row in jsonLogins["logins"]:
-        if row.get("deleted"):
+        if row.get("deleted"): continue
+        try:
+            user = decodeLoginData(key, row["encryptedUsername"])
+            pw = decodeLoginData(key, row["encryptedPassword"])
+            logins.append((row["hostname"], user, pw))
+        except Exception as e:
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f"Failed to decrypt {row.get('hostname')}: {e}")
             continue
-        encUsername = row["encryptedUsername"]
-        encPassword = row["encryptedPassword"]
-        logins.append(
-            (
-                row["hostname"],
-                decodeLoginData(key, encUsername),
-                decodeLoginData(key, encPassword),
-            )
-        )
     return logins
 
 
@@ -320,7 +310,6 @@ def readCSV(csv_file):
     reader = csv.DictReader(lower_header(csv_file))
     for row in reader:
         logins.append((rawURL(row["url"]), row["username"], row["password"]))
-    logging.info(f'read {len(logins)} logins')
     return logins
 
 
@@ -392,20 +381,29 @@ def askpass(directory):
     password = ""
     while True:
         try:
-            key = getKey(directory, password)
+            # FIX: Use get_all_keys and select best key manually
+            keys, _ = get_all_keys(directory, password)
+            # Prefer 32-byte key, fallback to first
+            best_key = next((k for k in keys if len(k) == 32), keys[0])
+            logging.info(f"Selected Master Key: {len(best_key)} bytes (from {len(keys)} candidates)")
+            return best_key
         except WrongPassword:
-            password = getpass("Master Password:")
+            password = getpass("Master Password: ")
         else:
             break
-    return key
+    return None
 
 
 def main_export(args):
     try:
         key = askpass(args.directory)
     except NoDatabase:
-        # if the database is empty, we are done!
         return
+
+    if not key:
+        logging.error("Failed to derive master key.")
+        return
+
     jsonLogins = getJsonLogins(args.directory)
     logins = exportLogins(key, jsonLogins)
     writer = csv.writer(args.file)
@@ -416,14 +414,17 @@ def main_export(args):
 def main_import(args):
     if args.file == sys.stdin:
         try:
-            key = getKey(args.directory)
+            key = askpass(args.directory)
         except WrongPassword:
-            # it is not possible to read the password
-            # if stdin is used for input
             logging.error("Password is not empty. You have to specify FROM_FILE.")
             sys.exit(1)
     else:
         key = askpass(args.directory)
+
+    if not key:
+        logging.error("Failed to derive master key.")
+        return
+
     jsonLogins = getJsonLogins(args.directory)
     logins = readCSV(args.file)
     addNewLogins(key, jsonLogins, logins)
@@ -448,29 +449,14 @@ def makeParser():
     )
 
     parser_import.add_argument(
-        "-f",
-        "--file",
-        dest="file",
-        type=argparse.FileType("r", encoding="utf-8"),
-        default=sys.stdin,
+        "-f", "--file", dest="file", type=argparse.FileType("r", encoding="utf-8"), default=sys.stdin
     )
     parser_export.add_argument(
-        "-f",
-        "--file",
-        dest="file",
-        type=argparse.FileType("w", encoding="utf-8"),
-        default=sys.stdout,
+        "-f", "--file", dest="file", type=argparse.FileType("w", encoding="utf-8"), default=sys.stdout
     )
 
     for sub in subparsers.choices.values():
-        sub.add_argument(
-            "-d",
-            "--directory",
-            "--dir",
-            type=Path,
-            default=None,
-            help="Firefox profile directory",
-        )
+        sub.add_argument("-d", "--directory", "--dir", type=Path, default=None, help="Firefox profile directory")
         sub.add_argument("-v", "--verbose", action="store_true")
         sub.add_argument("--debug", action="store_true")
 
@@ -487,33 +473,37 @@ def makeParser():
 
 
 def main():
-    logging.basicConfig(level=logging.ERROR, format="%(levelname)s: %(message)s")
-
+    # Default level ERROR (Silent), INFO for verbose, DEBUG for debug
     parser = makeParser()
     args = parser.parse_args()
 
+    log_level = logging.ERROR
     if args.verbose:
         log_level = logging.INFO
-    elif args.debug:
+    if args.debug:
         log_level = logging.DEBUG
-    else:
-        log_level = logging.ERROR
 
-    logging.getLogger().setLevel(log_level)
+    logging.basicConfig(level=log_level, format="%(message)s")
 
     if args.directory is None:
         try:
             args.directory = guessDir()
         except NoProfile:
-            print("")
+            print("No Firefox profile found.")
             parser.print_help()
             parser.exit()
     args.directory = args.directory.expanduser()
 
     try:
-        args.func(args)
+        # Wrap in try/except for BrokenPipeError to allow piping to head
+        try:
+            args.func(args)
+        except BrokenPipeError:
+            # Python flushes standard streams on exit; redirect remaining output to devnull to avoid error dump
+            sys.stdout = os.fdopen(1, 'w')
+            pass
     except NoDatabase:
-        logging.error("Firefox password database is empty. Please create it from Firefox.")
+        logging.error("Firefox password database is empty.")
 
 
 if __name__ == "__main__":
