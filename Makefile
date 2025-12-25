@@ -20,7 +20,7 @@ install:
 .PHONY: test
 test:
 	@echo 'Remember to run make install to test against the latest :)'
-	coverage run -m pytest -s tests/
+	coverage run -m pytest -svv tests/
 	coverage report -m --omit="tests/*"
 
 
