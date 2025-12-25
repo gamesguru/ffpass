@@ -5,12 +5,12 @@ from setuptools import setup
 
 
 def read(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
+    return open(os.path.join(os.path.dirname(__file__), fname), encoding="utf-8").read()
 
 
 setup(
     name="ffpass",
-    version="0.5.0",
+    version="0.6.0",
     author="Louis Abraham",
     license="MIT",
     author_email="louis.abraham@yahoo.fr",
