@@ -9,8 +9,8 @@ dist: flake8
 
 .PHONY: flake8
 flake8:
-	flake8 . --exclude '*venv' --count --select=E901,E999,F821,F822,F823 --show-source --statistics
-	flake8 . --exclude '*venv' --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+	flake8 . --exclude '*venv,build' --count --select=E901,E999,F821,F822,F823 --show-source --statistics
+	flake8 . --exclude '*venv,build' --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
 
 .PHONY: install

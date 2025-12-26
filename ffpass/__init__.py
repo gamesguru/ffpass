@@ -63,11 +63,13 @@ def censor(data):
     """
     Censors the middle third of a hex string or bytes object.
     """
-    if not data: return "None"
+    if not data:
+        return None
     s = data.hex() if isinstance(data, (bytes, bytearray)) else str(data)
 
     length = len(s)
-    if length <= 12: return s
+    if length <= 12:
+        return s
 
     third = length // 3
     return f"{s[:third]}.....{s[2*third:]}"
@@ -136,7 +138,7 @@ def decrypt_key_entry(a11, global_salt, master_password):
             entry_salt = decoded[0][1][0].asOctets()
             ciphertext = decoded[1].asOctets()
 
-            logging.debug(f"  > Method: PKCS12-3DES-Derivation")
+            logging.debug("  > Method: PKCS12-3DES-Derivation")
             logging.debug(f"  > Salt: {censor(entry_salt)} (Local) + {censor(global_salt)} (Global)")
 
             return PKCS7unpad(decrypt3DES(global_salt, master_password, entry_salt, ciphertext))
@@ -148,7 +150,8 @@ def decrypt_key_entry(a11, global_salt, master_password):
 
 def get_all_keys(directory, pwd=""):
     db = Path(directory) / "key4.db"
-    if not db.exists(): raise NoDatabase()
+    if not db.exists():
+        raise NoDatabase()
 
     conn = sqlite3.connect(str(db))
     c = conn.cursor()
@@ -157,7 +160,8 @@ def get_all_keys(directory, pwd=""):
     c.execute("SELECT item1, item2 FROM metadata WHERE id = 'password'")
     try:
         global_salt, item2 = next(c)
-    except StopIteration: raise NoDatabase()
+    except StopIteration:
+        raise NoDatabase()
 
     logging.info(f"[*] Global Salt: {censor(global_salt)}")
 
@@ -167,7 +171,7 @@ def get_all_keys(directory, pwd=""):
         try:
             algorithm_oid = decodedItem2[0][0].asTuple()
         except (IndexError, AttributeError):
-             raise ValueError("Could not decode password validation data structure.")
+            raise ValueError("Could not decode password validation data structure.")
 
         if algorithm_oid == OID_PKCS12_3DES:
             entrySalt = decodedItem2[0][1][0].asOctets()
@@ -234,8 +238,10 @@ def try_decrypt_login(key, ciphertext, iv):
             pt = cipher.decrypt(ciphertext)
             res = PKCS7unpad(pt)
             text = res.decode('utf-8')
-            if is_valid_text(text): return text, "AES-Standard"
-        except: pass
+            if is_valid_text(text):
+                return text, "AES-Standard"
+        except:
+            pass
 
     # Try 3DES
     if len(key) == 24:
@@ -244,16 +250,20 @@ def try_decrypt_login(key, ciphertext, iv):
             pt = cipher.decrypt(ciphertext)
             res = PKCS7unpad(pt)
             text = res.decode('utf-8')
-            if is_valid_text(text): return text, "3DES-Standard"
-        except: pass
+            if is_valid_text(text):
+                return text, "3DES-Standard"
+        except:
+            pass
 
     return None, None
 
 
 def is_valid_text(text):
-    if not text or len(text) < 2: return False
+    if not text or len(text) < 2:
+        return False
     printable = set(string.printable)
-    if sum(1 for c in text if c in printable) / len(text) < 0.9: return False
+    if sum(1 for c in text if c in printable) / len(text) < 0.9:
+        return False
     return True
 
 
@@ -264,7 +274,8 @@ def decodeLoginData(key, data):
         ciphertext = asn1data[2].asOctets()
 
         text, method = try_decrypt_login(key, ciphertext, iv)
-        if text: return text
+        if text:
+            return text
         raise ValueError("Decryption failed")
     except Exception:
         raise ValueError("Decryption failed")
@@ -315,7 +326,8 @@ def exportLogins(key, jsonLogins):
         return []
     logins = []
     for row in jsonLogins["logins"]:
-        if row.get("deleted"): continue
+        if row.get("deleted"):
+            continue
         try:
             user = decodeLoginData(key, row["encryptedUsername"])
             pw = decodeLoginData(key, row["encryptedPassword"])
@@ -371,24 +383,29 @@ def addNewLogins(key, jsonLogins, logins):
         jsonLogins["logins"].append(entry)
     jsonLogins["nextId"] += len(logins)
 
+# Constants used to guess cross-platform
+PROFILE_GUESS_DIRS = {
+    "darwin": "~/Library/Application Support/Firefox/Profiles",
+    "linux": "~/.mozilla/firefox",
+    "win32": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
+    "cygwin": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
+}
+
+def getProfiles():
+    paths = Path(PROFILE_GUESS_DIRS[sys.platform]).expanduser()
+    logging.debug(f"Paths: {paths}")
+    profiles = [path.parent for path in paths.glob(os.path.join("*", "logins.json"))]
+    logging.debug(f"Profiles: {profiles}")
+    return profiles
+
 
 def guessDir():
-    dirs = {
-        "darwin": "~/Library/Application Support/Firefox/Profiles",
-        "linux": "~/.mozilla/firefox",
-        "win32": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
-        "cygwin": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
-    }
-
-    if sys.platform not in dirs:
+    if sys.platform not in PROFILE_GUESS_DIRS:
         logging.error(f"Automatic profile selection is not supported for {sys.platform}")
         logging.error("Please specify a profile to parse (-d path/to/profile)")
         raise NoProfile
 
-    paths = Path(dirs[sys.platform]).expanduser()
-    profiles = [path.parent for path in paths.glob(os.path.join("*", "logins.json"))]
-    logging.debug(f"Paths: {paths}")
-    logging.debug(f"Profiles: {profiles}")
+    profiles = getProfiles()
 
     if len(profiles) == 0:
         logging.error("Cannot find any Firefox profiles")
@@ -481,7 +498,22 @@ def makeParser():
     )
 
     for sub in subparsers.choices.values():
-        sub.add_argument("-d", "--directory", "--dir", type=Path, default=None, help="Firefox profile directory")
+        sub.add_argument(
+            "-p",  # matches native: firefox -p
+            "-d",
+            "--directory",
+            "--dir",
+            type=Path,
+            metavar="DIRECTORY",
+            default=None,
+            help="Firefox profile directory",
+            # argcomplete
+            choices=getProfiles(),
+        )
+        try:
+            pass
+        except ImportError:
+            pass
         sub.add_argument("-v", "--verbose", action="store_true")
         sub.add_argument("--debug", action="store_true")
 
@@ -492,29 +524,33 @@ def makeParser():
         import argcomplete
         argcomplete.autocomplete(parser)
     except ModuleNotFoundError:
-        pass
+        logging.info(
+            "You can run 'pip install argcomplete' and add the hook to your shell RC for tab completion."
+        )
 
     return parser
 
 
 def main():
+
+    logging.basicConfig(level=logging.ERROR, format="%(message)s")
+
     parser = makeParser()
     args = parser.parse_args()
 
-    # Default level ERROR (Silent), INFO for verbose, DEBUG for debug
-    log_level = logging.ERROR
-    if args.verbose:
-        log_level = logging.INFO
+    # Default level WARN (quiet), INFO for verbose, DEBUG for debug
     if args.debug:
-        log_level = logging.DEBUG
-
-    logging.basicConfig(level=log_level, format="%(message)s")
+        logging.getLogger().setLevel(logging.DEBUG)
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
+    else:
+        logging.getLogger().setLevel(logging.WARNING)
 
     if args.directory is None:
         try:
             args.directory = guessDir()
         except NoProfile:
-            print("No Firefox profile found.")
+            logging.warning("No Firefox profile selected.")
             parser.print_help()
             parser.exit()
     args.directory = args.directory.expanduser()
