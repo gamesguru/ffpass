@@ -559,41 +559,51 @@ def makeParser():
         # This allows arbitrary paths (tests) but gives users tab completion.
         arg.completer = lambda **kwargs: [str(p) for p in getProfiles()]
 
-        try:
-            pass
-        except ImportError:
-            pass
         sub.add_argument("-v", "--verbose", action="store_true")
         sub.add_argument("--debug", action="store_true")
 
     parser_import.set_defaults(func=main_import)
     parser_export.set_defaults(func=main_export)
 
-    try:
-        import argcomplete
-        argcomplete.autocomplete(parser)
-    except ModuleNotFoundError:
-        logging.info(
-            "You can run 'pip install argcomplete' and add the hook to your shell RC for tab completion."
-        )
-
     return parser
 
 
-def main():
-    # default log level is warning
-    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+def setLogLevel(args):
 
-    parser = makeParser()
-    args = parser.parse_args()
-
-    # Adjust level based on flags
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     elif args.verbose:
         logging.getLogger().setLevel(logging.INFO)
 
-    # try to obtain profile directory
+
+def tryLoadArgcomplete(parser):
+
+    try:
+        import argcomplete
+        argcomplete.autocomplete(parser)
+
+    except ModuleNotFoundError:
+        logging.info(
+            "NOTE: You can run 'pip install argcomplete' "
+            "and add the hook to your shell RC for tab completion."
+        )
+
+
+def main():
+
+    # Default log level is warning
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+
+    parser = makeParser()
+    args = parser.parse_args()
+
+    # Adjust log level based on flags
+    setLogLevel(args)
+
+    # Try to load argcomplete
+    tryLoadArgcomplete(parser)
+
+    # Try to obtain profile directory
     if args.directory is None:
         try:
             args.directory = guessDir()
@@ -603,7 +613,7 @@ def main():
             parser.exit()
     args.directory = args.directory.expanduser()
 
-    # run arg parser
+    # Run arg parser
     try:
         # Wrap in try/except for BrokenPipeError to allow piping to head, i.e., ffpass export | head -5
         try:
