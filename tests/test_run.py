@@ -30,7 +30,7 @@ def clean_profile(tmp_path):
 
 
 def run_ffpass(mode, path):
-    command = ["ffpass", mode, "-d", str(path)]
+    command = ["python", "./ffpass/__init__.py", mode, "-d", str(path)]
 
     if mode == 'import':
         ffpass_input = OS_NEWLINE.join([HEADER, IMPORT_CREDENTIAL])
@@ -41,7 +41,7 @@ def run_ffpass(mode, path):
 
 
 def stdout_splitter(input_text):
-    return [x for x in input_text.splitlines() if x != ""]
+    return [x for x in input_text.splitlines()]
 
 
 def test_legacy_firefox_export(clean_profile):

@@ -374,6 +374,11 @@ def readCSV(csv_file):
 
     logins = []
     for row in reader:
+        logging.error(f"row: {row}")
+
+        if not row:
+            continue  # The Windows CSV parser can give extra empty rows
+
         if isinstance(reader, csv.DictReader):
             logging.error("DictReader it is!")
             u = row.get("url", "")
@@ -431,20 +436,22 @@ def addNewLogins(key, jsonLogins, logins):
 PROFILE_GUESS_DIRS = {
     "darwin": "~/Library/Application Support/Firefox/Profiles",
     "linux": "~/.mozilla/firefox",
-    "win32": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
-    "cygwin": os.path.expandvars(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles"),
+    "win32": os.path.expandvars("%APPDATA%\\Mozilla\\Firefox\\Profiles"),
+    "cygwin": os.path.expandvars("%APPDATA%\\Mozilla\\Firefox\\Profiles"),
 }
 
 
-def getProfiles():
+def getProfiles() -> list[Path]:
     paths = Path(PROFILE_GUESS_DIRS[sys.platform]).expanduser()
     logging.debug(f"Paths: {paths}")
-    profiles = [path.parent for path in paths.glob(os.path.join("*", "logins.json"))]
+    _potential_profile_paths = paths.glob(os.path.join("*", "logins.json"))
+    logging.debug(f"_potential_profile_paths: {_potential_profile_paths}")
+    profiles = [path.parent for path in _potential_profile_paths]
     logging.debug(f"Profiles: {profiles}")
     return profiles
 
 
-def guessDir():
+def guessDir() -> Path:
     if sys.platform not in PROFILE_GUESS_DIRS:
         logging.error(f"Automatic profile selection is not supported for {sys.platform}")
         logging.error("Please specify a profile to parse (-d path/to/profile)")
@@ -501,7 +508,8 @@ def main_export(args):
 
     jsonLogins = getJsonLogins(args.directory)
     logins = exportLogins(key, jsonLogins)
-    writer = csv.writer(args.file)
+    # Hard-code to "\n" to fix Windows bug with every other row empty: [a, "", b, "", ...].
+    writer = csv.writer(args.file, lineterminator="\n")
     writer.writerow(["url", "username", "password"])
     writer.writerows(logins)
 
@@ -606,12 +614,11 @@ def main():
     # Try to obtain profile directory
     if args.directory is None:
         try:
-            args.directory = guessDir()
+            args.directory = guessDir().expanduser()
         except NoProfile:
             logging.error("No Firefox profile selected.")
             parser.print_help()
             parser.exit()
-    args.directory = args.directory.expanduser()
 
     # Run arg parser
     try:
