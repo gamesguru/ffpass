@@ -593,6 +593,17 @@ def makeParser():
     parser_import.set_defaults(func=main_import)
     parser_export.set_defaults(func=main_export)
 
+    # Try to load argcomplete
+    try:
+        import argcomplete
+        argcomplete.autocomplete(parser)
+
+    except ModuleNotFoundError:
+        sys.stderr(
+            "NOTE: You can run 'pip install argcomplete' "
+            "and add the hook to your shell RC for tab completion."
+        )
+
     return parser
 
 
@@ -604,32 +615,21 @@ def setLogLevel(args):
         logging.getLogger().setLevel(logging.INFO)
 
 
-def tryLoadArgcomplete(parser):
-
-    try:
-        import argcomplete
-        argcomplete.autocomplete(parser)
-
-    except ModuleNotFoundError:
-        logging.info(
-            "NOTE: You can run 'pip install argcomplete' "
-            "and add the hook to your shell RC for tab completion."
-        )
-
-
 def main():
-
-    # Default log level is warning
-    logging.basicConfig(level=logging.WARNING, format="%(message)s")
-
     parser = makeParser()
     args = parser.parse_args()
 
+    # Determine log level
+    log_level = logging.WARNING
+    if args.debug:
+        log_level = logging.DEBUG
+    elif args.verbose:
+        log_level = logging.INFO
+
+    logging.basicConfig(level=log_level, format="%(message)s")
+
     # Adjust log level based on flags
     setLogLevel(args)
-
-    # Try to load argcomplete
-    tryLoadArgcomplete(parser)
 
     # Try to obtain profile directory
     if args.directory is None:
