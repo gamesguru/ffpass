@@ -368,46 +368,43 @@ def exportLogins(key, jsonLogins):
 
 
 def readCSV(csv_file):
-    # Peek at the first line to detect if header exists
-    first_line = csv_file.readline()
-    logging.debug(f"first_line: {first_line}")
-    if not first_line:
-        logging.warning('WARN: Nothing detected, first line is blank.')
-        return []
 
-    # Heuristic: if it contains both keys (at index=2,3), assume it's a header
-    is_header = (
-        first_line[1].lower() in {"username", "uname", "user", "u"}
-        and first_line[2].lower() in {"password", "passwd", "pass", "p"}  # noqa: W503 line break before binary operator
-    )
-
-    if is_header:
-        # Re-chain the first line, but ensure DictReader lowercases the header row
-        # by creating an iterator that lowercases the first item only
-        def normalized_iter():
-            yield first_line.lower()
-            yield from csv_file
-        logging.info("Using CSV DictReader.")
-        reader = csv.DictReader(normalized_iter())
-    else:
-        logging.info("Using CSV RowReader.")
-        reader = csv.reader(csv_file)
+    reader = csv.reader(csv_file)
 
     logins = []
-    for row in reader:
-        logging.error(f"row: {row}")
+    first_row = None
 
-        if not row or (row[0] == '\x04' and len(row) < 3):
-            break  # Windows doesn't have Ctrl+D, so let's break on first empty line
+    # Loop through logins
+    for i, row in enumerate(reader):
 
-        if isinstance(reader, csv.DictReader):
-            logging.error("DictReader it is!")
-            u = row.get("url", "")
-            n = row.get("username", "")
-            p = row.get("password", "")
-        else:
-            logging.error("RowReader it is!")
-            u, n, p = row
+        logging.debug(f"row: {row}")
+
+        # Peek at the first line to detect if it is a header or normal row
+        if first_row is None:
+            logging.debug(f"first_row: {row}")
+            first_row = row
+
+            # Break if we get an empty first row
+            if (not row) or (len(row) != 3) or (not row[1] and not row[2]):
+                logging.debug(f"Breaking loop since we got an empty row at index={i}.")
+                break
+            # Heuristic: if it lacks a URL (index=1) and has user,pass (index=2,3), assume it's a header and continue
+            if (
+                "http://" not in first_row[0]
+                and first_row[1].lower() in {"username", "uname", "user", "u"}  # noqa: W503 line break before binary operator
+                and first_row[2].lower() in {"password", "passwd", "pass", "p"}  # noqa: W503
+            ):
+                logging.debug(f"Continuing (skipping) over first row: [is_header={True}].")
+                continue
+
+            # ~~~ END peek at first row ~~~~~~~~~~
+
+        # Break if we get an empty row at any time
+        if (not row) or (len(row) != 3) or (not row[1] and not row[2]):
+            logging.debug(f"Breaking loop since we got an empty row at index={i}.")
+            break
+
+        u, n, p = row
         logins.append((rawURL(u), n, p))
 
     return logins
