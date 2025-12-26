@@ -6,7 +6,6 @@ Created on Fri Dec 25 19:30:48 2025
 @author: shane
 """
 
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -14,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 
-OS_NEWLINE = os.linesep
 HEADER = "url,username,password"
 EXPECTED_MIXED_OUTPUT = [HEADER, "http://www.mixedkeys.com,modern_user,modern_pass"]
 

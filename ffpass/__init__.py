@@ -50,6 +50,8 @@ from pyasn1.codec.der.encoder import encode as der_encode
 from pyasn1.type.univ import Sequence, OctetString, ObjectIdentifier
 from Crypto.Cipher import AES, DES3
 
+# noqa: W503
+# line break before binary operator
 
 MAGIC1 = b"\xf8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
 
@@ -345,7 +347,7 @@ def getJsonLogins(directory):
 
 def dumpJsonLogins(directory, jsonLogins):
     with open(directory / "logins.json", "w") as loginf:
-        json.dump(jsonLogins, loginf, separators=",:")
+        json.dump(jsonLogins, loginf, separators=(",", ":"))
 
 
 def exportLogins(key, jsonLogins):
@@ -390,11 +392,13 @@ def readCSV(csv_file):
                 break
             # Heuristic: if it lacks a URL (index=1) and has user,pass (index=2,3), assume it's a header and continue
             if (
-                "http://" not in first_row[0]
-                and first_row[1].lower() in {"username", "uname", "user", "u"}  # noqa: W503 line break before binary operator
-                and first_row[2].lower() in {"password", "passwd", "pass", "p"}  # noqa: W503
+                first_row[0].lower() in {"url", "hostname", "website", "site", "address", "link"}
+                or (
+                    first_row[1].lower() in {"username", "uname", "user", "u"}
+                    and first_row[2].lower() in {"password", "passwd", "pass", "p"}
+                )
             ):
-                logging.debug(f"Continuing (skipping) over first row: [is_header={True}].")
+                logging.debug(f"Continuing (skipping) over first row: index=0, [is_header={True}].")
                 continue
 
             # ~~~ END peek at first row ~~~~~~~~~~
@@ -594,11 +598,13 @@ def makeParser():
         import argcomplete
         argcomplete.autocomplete(parser)
 
-    except ModuleNotFoundError:
-        sys.stderr(
-            "NOTE: You can run 'pip install argcomplete' "
+    except (ImportError, ModuleNotFoundError):
+        sys.stderr.write(
+            "Error: argcomplete not found, run 'pip install argcomplete' "
             "and add the hook to your shell RC for tab completion."
         )
+        sys.stderr.write(os.linesep)
+        sys.stderr.flush()
 
     return parser
 

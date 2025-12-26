@@ -14,7 +14,6 @@ from hashlib import sha1
 from pathlib import Path
 
 from Crypto.Cipher import AES, DES3
-# Dependencies: pyasn1, pycryptodome
 from pyasn1.codec.der.encoder import encode as der_encode
 from pyasn1.type.univ import Integer, ObjectIdentifier, OctetString, Sequence
 

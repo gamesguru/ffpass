@@ -1,35 +1,54 @@
 SHELL:=/bin/bash
 
-.PHONY: pypi
-pypi: dist
-	twine upload dist/*
+.DEFAULT_GOAL=_help
 
-.PHONY: dist
-dist: flake8
+# NOTE: must put a <TAB> character and two pound "\t##" to show up in this list.  Keep it brief! IGNORE_ME
+.PHONY: _help
+_help:
+	@printf "\nUsage: make <command>, valid commands:\n\n"
+	@grep "##" $(MAKEFILE_LIST) | grep -v IGNORE_ME | sed -e 's/##//' | column -t -s $$'\t'
+
+
+.PHONY: build
+build: lint	## Build release
+build:
 	-rm dist/*
 	./setup.py sdist bdist_wheel
 
-.PHONY: flake8
-flake8:
-	flake8 . --exclude '*venv,build' --count --select=E901,E999,F821,F822,F823 --show-source --statistics
-	flake8 . --exclude '*venv,build' --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-	# CI pipeline
-	flake8 . --exclude='*venv,build' --ignore=E741,E501
+
+.PHONY: release
+release: build	## Upload release to PyPI (via Twine)
+	twine upload dist/*
+
+
+
+LINT_LOCS_PY ?= ffpass/ scripts tests/
+
+.PHONY: format
+format:	## Not phased in yet, no-op
+	-black --check ${LINT_LOCS_PY}
+	-isort --check ${LINT_LOCS_PY}
+
+
+.PHONY: lint
+lint:	## Lint the code
+	flake8 --count --show-source --statistics
+
+
+.PHONY: test
+test:	## Run pytest & show coverage report
+	coverage run
+	coverage report
+
 
 
 .PHONY: install
-install:
+install:	## Install from local source (via pip)
 	pip install .
-
-.PHONY: test
-test:
-	@echo 'Remember to run make install to test against the latest :)'
-	coverage run -m pytest -svv tests/
-	coverage report -m --omit="tests/*"
 
 
 .PHONY: clean
-clean:
+clean:	## Clean up build files/cache
 	rm -rf *.egg-info build dist
 	rm -f .coverage
 	find . \
