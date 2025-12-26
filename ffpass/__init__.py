@@ -139,19 +139,7 @@ def decrypt_key_entry(a11, global_salt, master_password):
             logging.debug(f"  > Method: PKCS12-3DES-Derivation")
             logging.debug(f"  > Salt: {censor(entry_salt)} (Local) + {censor(global_salt)} (Global)")
 
-            import hmac
-            hp = sha1(global_salt + master_password.encode()).digest()
-            pes = entry_salt + b"\x00" * (20 - len(entry_salt))
-            chp = sha1(hp + entry_salt).digest()
-            k1 = hmac.new(chp, pes + entry_salt, sha1).digest()
-            tk = hmac.new(chp, pes, sha1).digest()
-            k2 = hmac.new(chp, tk + entry_salt, sha1).digest()
-            k = k1 + k2
-            iv = k[-8:]
-            key = k[:24]
-
-            logging.debug(f"  > Cipher: 3DES-CBC | IV: {censor(iv)}")
-            return PKCS7unpad(DES3.new(key, DES3.MODE_CBC, iv).decrypt(ciphertext))
+            return PKCS7unpad(decrypt3DES(global_salt, master_password, entry_salt, ciphertext))
 
     except Exception as e:
         logging.debug(f"  > Failed: {e}")
@@ -165,7 +153,7 @@ def get_all_keys(directory, pwd=""):
     conn = sqlite3.connect(str(db))
     c = conn.cursor()
 
-    # 1. Get Global Salt & Password Check Entry
+    # 1. Get Global Salt
     c.execute("SELECT item1, item2 FROM metadata WHERE id = 'password'")
     try:
         global_salt, item2 = next(c)
@@ -174,8 +162,6 @@ def get_all_keys(directory, pwd=""):
     logging.info(f"[*] Global Salt: {censor(global_salt)}")
 
     # 2. VERIFY PASSWORD EXPLICITLY
-    # This ensures we throw WrongPassword BEFORE trying to decrypt keys
-    # and fail with a different error if keys are missing but password is correct.
     try:
         decodedItem2, _ = der_decode(item2)
         try:
@@ -188,7 +174,6 @@ def get_all_keys(directory, pwd=""):
             cipherT = decodedItem2[1].asOctets()
             clearText = decrypt3DES(global_salt, pwd, entrySalt, cipherT)
         elif algorithm_oid == OID_PBES2:
-            # Re-implement AES decrypt inline for password check
             algo = decodedItem2[0][1][0]
             pbkdf2_params = algo[1]
             entry_salt = pbkdf2_params[0].asOctets()
@@ -206,8 +191,6 @@ def get_all_keys(directory, pwd=""):
             raise WrongPassword()
 
     except Exception as e:
-        # If any crypto fails during verification, it's a wrong password
-        # (or corrupted salt/metadata, but we assume password first)
         logging.debug(f"Password check failed: {e}")
         raise WrongPassword()
 
@@ -217,6 +200,11 @@ def get_all_keys(directory, pwd=""):
     c.execute("SELECT a11, a102 FROM nssPrivate")
     rows = c.fetchall()
     logging.info(f"[*] Found {len(rows)} entries in nssPrivate")
+
+    # FIX: Check if rows exist BEFORE assuming corruption.
+    # If the table is empty, it's just an empty DB, not corruption.
+    if not rows:
+        raise NoDatabase()
 
     found_keys = []
     for idx, (a11, a102) in enumerate(rows):
@@ -231,9 +219,9 @@ def get_all_keys(directory, pwd=""):
             logging.debug(f"[*] Key #{idx}: Failed to decrypt (Corrupt?)")
 
     if not found_keys:
-        # We verified the password is correct above, but still found no keys.
-        # This is a database corruption issue, NOT a wrong password.
-        raise Exception("Database corrupted: Password verified, but no valid master keys found.")
+        # Rows existed, but none decrypted successfully.
+        # Since password was verified in step 2, this IS corruption.
+        raise Exception("Database corrupted: Password verified, but no valid master keys could be decrypted.")
 
     return found_keys, global_salt
 
@@ -434,10 +422,8 @@ def askpass(directory):
 
 
 def main_export(args):
-    try:
-        key = askpass(args.directory)
-    except NoDatabase:
-        return
+    # Removed try/except NoDatabase here to let it bubble to main() for proper logging
+    key = askpass(args.directory)
 
     if not key:
         logging.error("Failed to derive master key.")
