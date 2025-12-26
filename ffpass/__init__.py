@@ -165,7 +165,7 @@ def get_all_keys(directory, pwd=""):
     conn = sqlite3.connect(str(db))
     c = conn.cursor()
 
-    # 1. Get Global Salt
+    # 1. Get Global Salt & Password Check Entry
     c.execute("SELECT item1, item2 FROM metadata WHERE id = 'password'")
     try:
         global_salt, item2 = next(c)
@@ -173,7 +173,46 @@ def get_all_keys(directory, pwd=""):
 
     logging.info(f"[*] Global Salt: {censor(global_salt)}")
 
-    # 2. Check Password (simplified via key decryption attempt)
+    # 2. VERIFY PASSWORD EXPLICITLY
+    # This ensures we throw WrongPassword BEFORE trying to decrypt keys
+    # and fail with a different error if keys are missing but password is correct.
+    try:
+        decodedItem2, _ = der_decode(item2)
+        try:
+            algorithm_oid = decodedItem2[0][0].asTuple()
+        except (IndexError, AttributeError):
+             raise ValueError("Could not decode password validation data structure.")
+
+        if algorithm_oid == OID_PKCS12_3DES:
+            entrySalt = decodedItem2[0][1][0].asOctets()
+            cipherT = decodedItem2[1].asOctets()
+            clearText = decrypt3DES(global_salt, pwd, entrySalt, cipherT)
+        elif algorithm_oid == OID_PBES2:
+            # Re-implement AES decrypt inline for password check
+            algo = decodedItem2[0][1][0]
+            pbkdf2_params = algo[1]
+            entry_salt = pbkdf2_params[0].asOctets()
+            iters = int(pbkdf2_params[1])
+            key_len = int(pbkdf2_params[2])
+            enc_pwd = sha1(global_salt + pwd.encode('utf-8')).digest()
+            k = pbkdf2_hmac('sha256', enc_pwd, entry_salt, iters, dklen=key_len)
+            iv = clean_iv(decodedItem2[0][1][1][1].asOctets())
+            cipher = AES.new(k, AES.MODE_CBC, iv)
+            clearText = cipher.decrypt(decodedItem2[1].asOctets())
+        else:
+            raise ValueError(f"Unknown encryption method OID: {algorithm_oid}")
+
+        if clearText != b"password-check\x02\x02":
+            raise WrongPassword()
+
+    except Exception as e:
+        # If any crypto fails during verification, it's a wrong password
+        # (or corrupted salt/metadata, but we assume password first)
+        logging.debug(f"Password check failed: {e}")
+        raise WrongPassword()
+
+    logging.info("[*] Password Verified Correctly")
+
     # 3. Find ALL Keys
     c.execute("SELECT a11, a102 FROM nssPrivate")
     rows = c.fetchall()
@@ -189,11 +228,12 @@ def get_all_keys(directory, pwd=""):
             logging.info(f"[*] Decrypted Key #{idx}: {len(key)} bytes | ID: {a102.hex()}")
             found_keys.append(key)
         else:
-            logging.debug(f"[*] Key #{idx}: Failed to decrypt (Wrong Password or Corrupt)")
+            logging.debug(f"[*] Key #{idx}: Failed to decrypt (Corrupt?)")
 
     if not found_keys:
-        # If no keys decrypted, the password is definitely wrong
-        raise WrongPassword()
+        # We verified the password is correct above, but still found no keys.
+        # This is a database corruption issue, NOT a wrong password.
+        raise Exception("Database corrupted: Password verified, but no valid master keys found.")
 
     return found_keys, global_salt
 
@@ -381,7 +421,6 @@ def askpass(directory):
     password = ""
     while True:
         try:
-            # FIX: Use get_all_keys and select best key manually
             keys, _ = get_all_keys(directory, password)
             # Prefer 32-byte key, fallback to first
             best_key = next((k for k in keys if len(k) == 32), keys[0])
@@ -473,10 +512,10 @@ def makeParser():
 
 
 def main():
-    # Default level ERROR (Silent), INFO for verbose, DEBUG for debug
     parser = makeParser()
     args = parser.parse_args()
 
+    # Default level ERROR (Silent), INFO for verbose, DEBUG for debug
     log_level = logging.ERROR
     if args.verbose:
         log_level = logging.INFO
@@ -499,7 +538,6 @@ def main():
         try:
             args.func(args)
         except BrokenPipeError:
-            # Python flushes standard streams on exit; redirect remaining output to devnull to avoid error dump
             sys.stdout = os.fdopen(1, 'w')
             pass
     except NoDatabase:
