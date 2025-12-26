@@ -387,17 +387,18 @@ def readCSV(csv_file):
         def normalized_iter():
             yield first_line.lower()
             yield from csv_file
+        logging.info("Using CSV DictReader.")
         reader = csv.DictReader(normalized_iter())
     else:
-        # No header: Assume default order and provide fieldnames
+        logging.info("Using CSV RowReader.")
         reader = csv.reader(csv_file)
 
     logins = []
     for row in reader:
         logging.error(f"row: {row}")
 
-        if not row:
-            continue  # The Windows CSV parser can give extra empty rows
+        if not row or (row[0] == '\x04' and len(row) < 3):
+            break  # Windows doesn't have Ctrl+D, so let's break on first empty line
 
         if isinstance(reader, csv.DictReader):
             logging.error("DictReader it is!")
@@ -464,9 +465,7 @@ PROFILE_GUESS_DIRS = {
 def getProfiles() -> list[Path]:
     paths = Path(PROFILE_GUESS_DIRS[sys.platform]).expanduser()
     logging.debug(f"Paths: {paths}")
-    _potential_profile_paths = paths.glob(os.path.join("*", "logins.json"))
-    logging.debug(f"_potential_profile_paths: {_potential_profile_paths}")
-    profiles = [path.parent for path in _potential_profile_paths]
+    profiles = [path.parent for path in paths.glob(os.path.join("*", "logins.json"))]
     logging.debug(f"Profiles: {profiles}")
     return profiles
 
@@ -607,14 +606,6 @@ def makeParser():
     return parser
 
 
-def setLogLevel(args):
-
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-    elif args.verbose:
-        logging.getLogger().setLevel(logging.INFO)
-
-
 def main():
     parser = makeParser()
     args = parser.parse_args()
@@ -627,9 +618,6 @@ def main():
         log_level = logging.INFO
 
     logging.basicConfig(level=log_level, format="%(message)s")
-
-    # Adjust log level based on flags
-    setLogLevel(args)
 
     # Try to obtain profile directory
     if args.directory is None:
