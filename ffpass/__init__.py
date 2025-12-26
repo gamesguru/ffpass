@@ -1,13 +1,32 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 
+# Reverse-engineering by Laurent Clevy (@lclevy)
+# from https://github.com/lclevy/firepwd/blob/master/firepwd.py
+
 """
 The MIT License (MIT)
 Copyright (c) 2018 Louis Abraham <louis.abraham@yahoo.fr>
 Laurent Clevy (@lorenzo2472)
+# from https://github.com/lclevy/firepwd/blob/master/firepwd.py
+\x1B[34m\033[F\033[F
 
 ffpass can import and export passwords from Firefox Quantum.
+
+\x1B[0m\033[1m\033[F\033[F
+
+example of usage:
+    ffpass export --file passwords.csv
+
+    ffpass import --file passwords.csv
+
+\033[0m\033[1;32m\033[F\033[F
+
+If you found this code useful, add a star on <https://github.com/louisabraham/ffpass>!
+
+\033[0m\033[F\033[F
 """
+
 
 import sys
 from base64 import b64decode, b64encode
@@ -106,6 +125,7 @@ def decrypt3DES(globalSalt, masterPassword, entrySalt, encryptedData):
     k = k1 + k2
     iv = k[-8:]
     key = k[:24]
+    logging.info("key={} iv={}".format(key.hex(), iv.hex()))
     return DES3.new(key, DES3.MODE_CBC, iv).decrypt(encryptedData)
 
 
