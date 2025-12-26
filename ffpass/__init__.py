@@ -469,6 +469,10 @@ def guessDir():
 
 def askpass(directory):
     password = ""
+    n = 0
+    # Allow 1 automatic check + 2 user prompts = 3 attempts total.
+    # The condition "n < n_max" must allow n=0, n=1, n=2.
+    n_max = 3
     while True:
         try:
             keys, _ = get_all_keys(directory, password)
@@ -477,9 +481,13 @@ def askpass(directory):
             logging.info(f"Selected Master Key: {len(best_key)} bytes (from {len(keys)} candidates)")
             return best_key
         except WrongPassword:
+            n += 1
+            if n >= n_max:
+                break
             password = getpass("Master Password: ")
-        else:
-            break
+
+    if n > 0:
+        logging.error(f"wrong master password after {n_max - 1} prompts!")
     return None
 
 

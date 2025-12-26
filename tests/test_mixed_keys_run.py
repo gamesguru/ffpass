@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec 25 19:30:48 2025
+
+@author: shane
+"""
 
 import os
 import shutil
-import pytest
 import sys
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 OS_NEWLINE = os.linesep
 HEADER = "url,username,password"
